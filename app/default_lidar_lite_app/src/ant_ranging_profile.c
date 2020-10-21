@@ -195,6 +195,10 @@ void ant_rp_evt_handler(ant_evt_t * p_ant_evt, void * p_context)
                 }
                 break;
 
+            case EVENT_CHANNEL_CLOSED:
+                NRF_LOG_INFO("ANT channel has been closed");
+                break;
+
             default:
                 NRF_LOG_ERROR("<%d> Unrecognized event in ant_rp_evt_handler(): %d",__LINE__,p_ant_evt->event);
                 break;

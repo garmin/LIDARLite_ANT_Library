@@ -263,13 +263,31 @@ lidar_lite_return_t lidar_lite_set_quick_termination_mode(lidar_lite_termination
  */
 lidar_lite_return_t lidar_lite_set_high_accuracy_count(uint8_t count);
 
- /** @brief  Retrieve a copy of the FPGA cache maintained by Library
+ /** @brief  Retrieve a copy of a register from the FPGA register cache maintained by Library
  *
  * @param[in]   register_address:  register whose value is requested
  *
  * @retval      Value of register
  */
 uint8_t lidar_lite_get_library_register_value(uint8_t register_address);
+
+ /** @brief  Override a register value in the FPGA register cache maintained by Library
+ *
+ * @param[in]   register_address      The register address you wish to override
+ * @param[in]   value                 The new register value
+ *
+ * @retval      LIDAR_LITE_SUCCESS
+ */
+lidar_lite_return_t lidar_lite_set_library_register_value(uint8_t register_address, uint8_t value);
+
+ /** @brief  Retrieve the entire FPGA register cache maintained by Library. Can be used to support multi-byte I2C reads
+ *
+ * @param[out]  buffer   The register cache buffer.
+ *
+ * @retval      LIDAR_LITE_SUCCESS
+ */
+lidar_lite_return_t lidar_lite_get_library_register_cache(uint8_t buffer[]);
+
 
 
 #endif

@@ -48,6 +48,11 @@ limitations under the License.
 #define LL_STATUS_BUSY                      0x01    // Used to indicate that the library is currently busy taking a measurement
 #define LL_STATUS_INTERFACE_LOW_PWR         0x08    // Used to indicate that the library is currently in low power and I2C read/writes take longer
 
+// definitions for the RADIO configuration
+#define RADIO_ON                            0xFF    // On command recieved from I2C master
+#define RADIO_OFF                           0x00    // Off command recieved from I2C master
+#define RADIO_STATUS_NOT_AVAILABLE          0x55    // Status of Radio was not available error code
+
 #define LL_TEMP_MEASUREMENT                 0xe0
 #define LL_HARDWARE_VERSION                 0xe1
 #define LL_POWER_MODE                       0xe2
@@ -59,6 +64,7 @@ limitations under the License.
 #define LL_HIGH_ACCURACY_MODE               0xeb
 #define LL_SOC_TEMPERATURE                  0xec
 #define LL_INTERNAL_STATUS_TEST             0xed
+#define LL_RADIO_CONFIG                     0xf0
 
 #define LL_I2C_SUCCESS                      0x01
 #define LL_I2C_FAILURE                      0x00
@@ -70,9 +76,7 @@ limitations under the License.
 #define BYTE_TWO                            0x02
 #define BYTE_THREE_MSB                      0x03
 
-// This is to protect the read and write of register intercepted over I2C that make it
-// into the default case in the switch statement
-#define SPI_MAX_REGISTER                    0x7F
+#define SPI_MAX_REGISTER                    0xFF
 
 /** @brief      Decode the payload that was received from a TWI master write
  *

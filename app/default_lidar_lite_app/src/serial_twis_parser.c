@@ -20,6 +20,7 @@ limitations under the License.
 #include "lidar_lite_interface.h"
 #include "lidar_config_nvm.h"
 #include "ant_ranging_profile.h"
+#include "ant_interface.h"
 #include "nrf_sdm.h"
 #include "nrf_soc.h"
 #include "nrf_bootloader_info.h"
@@ -96,30 +97,17 @@ void serial_twis_parser_decode_message(uint8_t * p_rx_data, uint32_t rx_data_siz
             // Attempt to read the status register directly from the FPGA
             lidar_lite_return_t ll_ret_code = lidar_lite_request_register_read(LL_REGISTER_STATUS);
 
-            // If in low power mode, let the I2C interface know so that they can slow transmissions
-            uint8_t power_mode = lidar_nvm_get_power_mode();
-            tx_data[0] = 0;
-
-            if (power_mode != LIDAR_LITE_ALWAYS_ON)
-            {
-                tx_data[0] |= LL_STATUS_INTERFACE_LOW_PWR;
-            }
+            uint8_t current_status = lidar_lite_get_library_register_value(LL_REGISTER_STATUS);
 
             // If the library is currently busy, then report that over the TWI interface
             if (ll_ret_code != LIDAR_LITE_SUCCESS)
             {
                 //Report that the library is currently taking a distance measurement or performing an I2C request in low power mode
-                tx_data[0] |= LL_STATUS_BUSY;
-                serial_twis_prepare_tx_buffer(tx_data, 1);
+                current_status |= LL_STATUS_BUSY;
+                // write updated mode to library register cache
+                lidar_lite_set_library_register_value(LL_REGISTER_STATUS, current_status);
             }
-            else
-            {
-                // cached version, this becomes stale very quickly as the Automatic Noise
-                // adjustment is running all the time on the FPGA and BUSY is common when reading
-                // This register
-                tx_data[0] |= lidar_lite_get_library_register_value(LL_REGISTER_STATUS);
-                serial_twis_prepare_tx_buffer(tx_data, 1);
-            }
+
             break;
         }
 
@@ -128,8 +116,6 @@ void serial_twis_parser_decode_message(uint8_t * p_rx_data, uint32_t rx_data_siz
             if (is_register_read_request)
             {
                 uint8_t acquisition_count = lidar_nvm_get_acquisition_count();
-                tx_data[0] = acquisition_count;
-                serial_twis_prepare_tx_buffer(tx_data, 1);
             }
             else
             {
@@ -160,20 +146,14 @@ void serial_twis_parser_decode_message(uint8_t * p_rx_data, uint32_t rx_data_siz
         {
             lidar_lite_retrieve_last_measurement(&tx_data[1], &tx_data[0]);
             NRF_LOG_DEBUG("<%d> Last measured distance: %02x, %02x",__LINE__, tx_data[0], tx_data[1]);
-
-            // Prepare two bytes of data so that TWI master can use auto increment to get full distance
-            serial_twis_prepare_tx_buffer(tx_data, 2);
             break;
         }
-
         case LL_REGISTER_FULL_DELAY_HIGH:
         {
 
             uint8_t unused_low_byte;
             lidar_lite_retrieve_last_measurement(&tx_data[0], &unused_low_byte);
-
-            // Prepare two bytes of data so that TWI master can use auto increment to get full distance
-            serial_twis_prepare_tx_buffer(tx_data, 1);
+            NRF_LOG_DEBUG("<%d> Last measured distance: %02x, %02x",__LINE__, tx_data[0], unused_low_byte);
             break;
         }
 
@@ -181,82 +161,63 @@ void serial_twis_parser_decode_message(uint8_t * p_rx_data, uint32_t rx_data_siz
         // If a register write from address 0x16 is intercepted, accept 5 byte command
         case LL_REGISTER_UNIT_ID_0:
         {
-            if (is_register_read_request)
-            {
-                uint8_t unit_id[4] = {0};
-                // need to retrieve the 4 byte ANT ID, this is little endian
-                serial_twis_get_unit_identification(unit_id);
-                memcpy(&tx_data[0], unit_id, 4);
-                serial_twis_prepare_tx_buffer(tx_data, 4);
-            }
-            else        // write request
+            if (is_register_read_request == false)
             {
                 uint8_t buffer[I2C_SEC_ADDRESS_BUFFER_SIZE] = {0};
                 memcpy(buffer, &p_rx_data[1], I2C_SEC_ADDRESS_BUFFER_SIZE);
                 err_code = serial_twis_check_and_configure_secondary_i2c_address(buffer);
-                if (err_code != NRF_SUCCESS)
+                if (err_code == NRF_SUCCESS)
+                {
+                    // If secondary I2C address has been set successfully, set I2C_CONFIG register to
+                    // LL_BOTH_ADDRESSES
+                    err_code = serial_twis_configure_i2c_addresses(LL_BOTH_ADDRESSES);
+                    if (err_code != NRF_SUCCESS)
+                    {
+                        NRF_LOG_DEBUG("Configure I2C_CONFIG to LL_BOTH_ADDRESSES FAILED");
+                    }
+                }
+                else
                 {
                     NRF_LOG_DEBUG("Secondary I2C address not applied");
                 }
-
             }
             break;
         }
 
+        // remaining registers for Unit ID and secondary I2C address
         case LL_REGISTER_UNIT_ID_1:
-        {
-            uint8_t unit_id[4] = {0};
-            // need to retrieve byte 1 from Unit ID
-            serial_twis_get_unit_identification(unit_id);
-
-            tx_data[0] = unit_id[BYTE_ONE];
-            serial_twis_prepare_tx_buffer(tx_data, 1);
-            break;
-        }
-
         case LL_REGISTER_UNIT_ID_2:
-        {
-            uint8_t unit_id[4] = {0};
-            // need to retrieve byte 2 from Unit ID
-            serial_twis_get_unit_identification(unit_id);
-
-            tx_data[0] = unit_id[BYTE_TWO];
-            serial_twis_prepare_tx_buffer(tx_data, 1);
-            break;
-        }
-
         case LL_REGISTER_UNIT_ID_3:
-        {
-            uint8_t unit_id[4] = {0};
-            // need to retrieve high byte, byte 3 from Unit ID
-            serial_twis_get_unit_identification(unit_id);
-
-            tx_data[0] = unit_id[BYTE_THREE_MSB];
-            serial_twis_prepare_tx_buffer(tx_data, 1);
             break;
-        }
 
         case LL_REGISTER_I2C_SEC_ADDR:
         {
-            err_code = lidar_nvm_config_get_slave_address(&tx_data[0]);
-            if (err_code == NRF_SUCCESS)
+            if(is_register_read_request)
             {
-                serial_twis_prepare_tx_buffer(tx_data, 1);
-            }
-            else
-            {
-                NRF_LOG_DEBUG("Secondary I2C slave address not found in NVM");
+                uint8_t secondary_i2c_address;
+                err_code = lidar_nvm_config_get_slave_address(&secondary_i2c_address);
+                if(err_code == FDS_SUCCESS)
+                {
+                    lidar_lite_set_library_register_value(LL_REGISTER_I2C_SEC_ADDR, secondary_i2c_address);
+                }
+                else
+                {
+                    NRF_LOG_ERROR("Slave address retrieval from NVM was not successful.");
+                }
             }
             break;
         }
 
         case LL_REGISTER_I2C_CONFIG:
         {
-            command = p_rx_data[1];
-            err_code = serial_twis_configure_i2c_addresses(command);
-            if (err_code != NRF_SUCCESS)
+            if(is_register_read_request == false)
             {
-                NRF_LOG_DEBUG("I2C configuration command FAILED");
+                command = p_rx_data[1];
+                err_code = serial_twis_configure_i2c_addresses(command);
+                if (err_code != NRF_SUCCESS)
+                {
+                    NRF_LOG_DEBUG("I2C configuration command FAILED");
+                }
             }
             break;
         }
@@ -268,8 +229,6 @@ void serial_twis_parser_decode_message(uint8_t * p_rx_data, uint32_t rx_data_siz
                 uint8_t detection_sensitivity;
                 // read value from NVM
                 detection_sensitivity = lidar_nvm_get_detection_sensitivity();
-                tx_data[0] = detection_sensitivity;
-                serial_twis_prepare_tx_buffer(tx_data, 1);
             }
             else
             {
@@ -297,18 +256,7 @@ void serial_twis_parser_decode_message(uint8_t * p_rx_data, uint32_t rx_data_siz
             break;
         }
 
-        case LL_REGISTER_LIB_VERSION:
-        {
-            NRF_LOG_DEBUG("Request Lib Version");
-            const char * lib_version;
 
-            err_code = lidar_lite_request_library_version(&lib_version);
-            APP_ERROR_CHECK(err_code);
-
-            memcpy(tx_data, lib_version, LIDAR_LITE_LIB_VERSION_LENGTH);
-            serial_twis_prepare_tx_buffer(tx_data, LIDAR_LITE_LIB_VERSION_LENGTH);
-            break;
-        }
 
         case LL_REGISTER_CORR_DATA:
         {
@@ -331,45 +279,26 @@ void serial_twis_parser_decode_message(uint8_t * p_rx_data, uint32_t rx_data_siz
 
         case LL_REGISTER_GVER_LO:
         {
-            // trigger a new FPGA read of low version number
-            lidar_lite_request_fpga_version_low();
             NRF_LOG_DEBUG("Request Garmin Version Low");
-
-            // retrieve last read from the cache
-            tx_data[0] = lidar_lite_get_library_register_value(LL_REGISTER_GVER_LO);
-            serial_twis_prepare_tx_buffer(tx_data, 1);
             break;
-       }
+        }
 
         case LL_REGISTER_GVER_HI:
         {
-            // trigger a new FPGA read of high version number
-            lidar_lite_request_fpga_version_high();
             NRF_LOG_DEBUG("Request Garmin Version High");
-
-            // retrieve last read from the cache
-            tx_data[0] = lidar_lite_get_library_register_value(LL_REGISTER_GVER_HI);
-            serial_twis_prepare_tx_buffer(tx_data, 1);
             break;
         }
 
         case LL_TEMP_MEASUREMENT:
         {
-            // Kick off temperature measurement, TWI buffer will be loaded when main receives the temperature event
+            // Kick off temperature measurement, Library cache will be updated when main receives the temperature event
             lidar_lite_get_temp();
-            // retrieve the last board temperature reading
-            tx_data[0] = lidar_lite_retrieve_board_temperature();
-            serial_twis_prepare_tx_buffer(tx_data, 1);
             break;
         }
 
-        case LL_HARDWARE_VERSION:
-        {
-            // hardware version is known right after FPGA powers up
-            tx_data[0] = lidar_lite_retrieve_hardware_version();
-            serial_twis_prepare_tx_buffer(tx_data, 1);
-            break;
-        }
+
+
+
 
         case LL_POWER_MODE:
         {
@@ -377,8 +306,6 @@ void serial_twis_parser_decode_message(uint8_t * p_rx_data, uint32_t rx_data_siz
             if (is_register_read_request)
             {
                 uint8_t power_mode = lidar_nvm_get_power_mode();
-                tx_data[0] = power_mode;
-                serial_twis_prepare_tx_buffer(tx_data, 1);
             }
             else
             {
@@ -439,8 +366,6 @@ void serial_twis_parser_decode_message(uint8_t * p_rx_data, uint32_t rx_data_siz
             if (is_register_read_request)
             {
                 uint8_t measurement_interval = lidar_nvm_get_measurement_interval();
-                tx_data[0] = measurement_interval;
-                serial_twis_prepare_tx_buffer(tx_data, 1);
             }
             else
             {
@@ -500,8 +425,6 @@ void serial_twis_parser_decode_message(uint8_t * p_rx_data, uint32_t rx_data_siz
             if (is_register_read_request)
             {
                 uint8_t termination_mode = lidar_nvm_get_quick_termination_mode();
-                tx_data[0] = termination_mode;
-                serial_twis_prepare_tx_buffer(tx_data, 1);
             }
             else
             {
@@ -563,8 +486,6 @@ void serial_twis_parser_decode_message(uint8_t * p_rx_data, uint32_t rx_data_siz
             if (is_register_read_request == true)
             {
                 bool mode = lidar_nvm_get_access_mode();
-                tx_data[0] = (mode == false) ? NVM_STORAGE_DISABLED : NVM_STORAGE_ENABLED;
-                serial_twis_prepare_tx_buffer(tx_data, 1);
             }
             else
             {
@@ -607,8 +528,6 @@ void serial_twis_parser_decode_message(uint8_t * p_rx_data, uint32_t rx_data_siz
             if (is_register_read_request)
             {
                 uint8_t counter = lidar_nvm_get_high_accuracy_count();
-                tx_data[0] = counter;
-                serial_twis_prepare_tx_buffer(tx_data, 1);
             }
             else    // write request
             {
@@ -649,7 +568,7 @@ void serial_twis_parser_decode_message(uint8_t * p_rx_data, uint32_t rx_data_siz
             if (is_register_read_request)
             {
                 uint8_t enabled;
-                int32_t temp;
+                int32_t temp = LL_SOC_TEMPERATURE_ERROR;    // will be overwritten
 
                 sd_softdevice_is_enabled(&enabled);
                 if (enabled)
@@ -658,13 +577,9 @@ void serial_twis_parser_decode_message(uint8_t * p_rx_data, uint32_t rx_data_siz
                     {
                         temp = (int8_t)(temp / 4);   // from examples in SDK 15, need to divide by 4
                         NRF_LOG_INFO("<%d> SoC temperature: %d",__LINE__,temp);
-                        tx_data[0] = (uint8_t)temp;
                     }
-                    else    // error reading temperature
-                    {
-                        tx_data[0] = LL_SOC_TEMPERATURE_ERROR;
-                    }
-                    serial_twis_prepare_tx_buffer(tx_data, 1);
+                    // store SOC temperature in Library register cache
+                    lidar_lite_set_library_register_value(LL_SOC_TEMPERATURE, (uint8_t)temp);
                 }
                 else
                 {
@@ -675,26 +590,99 @@ void serial_twis_parser_decode_message(uint8_t * p_rx_data, uint32_t rx_data_siz
             break;
         }
 
+        case LL_RADIO_CONFIG:
+        {
+            if (is_register_read_request == false)
+            {
+                uint8_t status;
+                uint32_t error_code;
+                // command that was received
+                command = p_rx_data[1];
+                // check what state the radio is in
+                error_code = sd_ant_channel_status_get(ANT_RP_BROADCAST_CHANNEL_NUMBER, &status);
+                if (error_code != NRF_SUCCESS)
+                {
+                    NRF_LOG_ERROR("Radio channel status is not available");
+                }
+                else
+                {
+                    // This channel is assigned in ant_rp_channel_setup <234> of source file
+                    // ant_ranging_profile.c
+                    if ((status & STATUS_CHANNEL_STATE_MASK) == STATUS_UNASSIGNED_CHANNEL)
+                    {
+                        NRF_LOG_ERROR("ANT channel has not been assigned");
+                    }
+                    else
+                    {
+                        switch (command)
+                        {
+                            case RADIO_OFF:
+                            {
+                                error_code = sd_ant_channel_close(ANT_RP_BROADCAST_CHANNEL_NUMBER);
+                                if (error_code != NRF_SUCCESS)
+                                {
+                                    NRF_LOG_INFO("ANT channel could not be closed");
+                                }
+                            }
+                            break;
+                            case RADIO_ON:
+                            {
+                                error_code = sd_ant_channel_open(ANT_RP_BROADCAST_CHANNEL_NUMBER);
+                                if (error_code != NRF_SUCCESS)
+                                {
+                                    NRF_LOG_INFO("ANT channel could not be opened");
+                                }
+                            }
+                            break;
+                            default:
+                                NRF_LOG_INFO("Invalid command received for Radio On/OFF");
+                                break;
+                        }
+                    }
+                }
+            }
+            else    // read request for RADIO status
+            {
+                uint8_t status = 0;
+                uint8_t reporting_status;
+                uint32_t error_code;
+
+                error_code = sd_ant_channel_status_get(ANT_RP_BROADCAST_CHANNEL_NUMBER, &status);
+                if (error_code != NRF_SUCCESS)
+                {
+                    NRF_LOG_ERROR("Radio channel status is not available");
+                    status = RADIO_STATUS_NOT_AVAILABLE;
+                }
+                else
+                {
+                    reporting_status = (status & STATUS_CHANNEL_STATE_MASK);
+                    NRF_LOG_INFO("SD channel status: %d",reporting_status);
+                    if (reporting_status == STATUS_SEARCHING_CHANNEL ||
+                        reporting_status == STATUS_TRACKING_CHANNEL)
+                    {
+                        status = RADIO_ON;
+                    }
+                    else
+                    {
+                        status = RADIO_OFF;
+                    }
+                }
+
+                lidar_lite_set_library_register_value(LL_RADIO_CONFIG, (uint8_t)status);
+            }
+        }
+        break;
 
         default:
             if (register_address <= SPI_MAX_REGISTER)
             {
                 if (is_register_read_request)
                 {
-                    uint8_t value;
-                    // trigger a register read
-                    lidar_lite_request_register_read(register_address);
-                    value = lidar_lite_get_library_register_value(register_address);
-
                     NRF_LOG_DEBUG("Generic register read on address 0x%02x", register_address);
-
-                    tx_data[0] = value;
-                    serial_twis_prepare_tx_buffer(tx_data, 1);
                 }
                 else
                 {
                     command = p_rx_data[1];
-
                     NRF_LOG_DEBUG("Generic register write on address 0x%02x, with value 0x%02x", register_address, command);
                     lidar_lite_request_register_write(register_address, command);
                 }

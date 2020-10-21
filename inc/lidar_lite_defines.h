@@ -61,11 +61,7 @@ typedef enum
 typedef enum
 {
     LIDAR_LITE_EVT_POWER_UP_COMPLETE,           // The FPGA has completed it's power up process and is ready to accept commands
-    LIDAR_LITE_EVT_POWER_DOWN_COMPLETE,         // The FPGA has completed it's power down process and is ready to receive the start up command.
     LIDAR_LITE_EVT_MEASUREMENT_COMPLETE,        // The FPGA has completed the measurement and is ready to accept commands
-    LIDAR_LITE_EVT_CONFIG_APPLIED,              // The requested FPGA configuration has completed and is ready to accept commands
-    LIDAR_LITE_EVT_FPGA_VERSION_RECEIVED,       // The 16 bit Garmin FPGA Version has been received and is ready to accept commands
-    LIDAR_LITE_EVT_WRITE_COMPLETE,              // Writing to the PFGA register has completed and is ready to accept commands
     LIDAR_LITE_EVT_READ_COMPLETE,               // Reading from the PFGA register has completed and is ready to accept commands
     LIDAR_LITE_EVT_TEMP_COMPLETE                // ADC has completed the temperature reading and computation
 } lidar_lite_evt_type_t;
@@ -90,8 +86,6 @@ typedef struct
     union
     {
         uint16_t distance_cm;                                 ///< Data for @ref LIDAR_LITE_EVT_MEASUREMENT_DONE
-        uint16_t fpga_version;                                ///< Data for @ref LIDAR_LITE_EVT_FPGA_VERSION_RECEIVED
-        lidar_lite_config_t applied_configuration;            ///< Data for @ref LIDAR_LITE_EVT_CONFIG_APPLIED
         lidar_lite_fpga_register_t fpga_register;             ///< Data for @ref LIDAR_LITE_EVT_READ_COMPLETE
         int8_t board_temperature;                             ///< Data for @ref LIDAR_LITE_EVT_TEMP_COMPLETE
     } data;

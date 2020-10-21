@@ -43,13 +43,20 @@ static void serial_twis_write_request(void);
 static void serial_twis_write_complete(size_t cnt);
 static void serial_twis_read_request(void);
 static void serial_twis_read_complete(size_t cnt);
+static uint32_t serial_twis_id_number_maker(uint8_t user_input[]);
 static ret_code_t lidar_lite_serial_twis_restart();
 static ret_code_t enable_i2c_addresses(uint8_t primary, uint8_t secondary);
 
-static uint8_t m_rxbuff[LL_TWIS_RX_BUFFER_SIZE];                               // Receive buffer for data coming from TWI interface.
+static uint8_t m_rxbuff[LL_TWIS_RX_BUFFER_SIZE];    // Receive buffer for data coming from TWI interface.
 
-static uint8_t m_txbuff[LL_TWIS_TX_BUFFER_SIZE];                               // Transmit buffer for data coming from TWI interface.
-static uint32_t m_txbuff_used = 0;                                            // Represents how much usable data was placed into the transmit buffer
+static uint8_t m_txbuff[LL_TWIS_TX_BUFFER_SIZE];    // Transmit buffer for data coming from TWI interface.
+static uint32_t m_txbuff_used = 0;                  // Represents how much usable data was placed into the transmit buffer
+// variables and functions used in packing bytes into I2C buffer
+#define MAX_LIBRARY_REG_SIZE    256
+#define WIRE_LIB_BUFFER_SIZE    32                  // Match the buffer size used in the Arduino
+static uint8_t register_start_address       = 0x00;
+static uint8_t library_register_values[MAX_LIBRARY_REG_SIZE] = {0}; // Library FPGA register values
+static uint16_t offset, start, wrap_around;                         // assign static global for speed up
 
 static const nrf_drv_twis_t m_twis = NRF_DRV_TWIS_INSTANCE(LL_TWIS_INST);     // TWIS driver instance.
 
@@ -81,6 +88,9 @@ static void serial_twis_write_complete(size_t cnt)
         is_register_read_request = true;
     }
 
+    // Starting address for multi-byte reads, located in m_rxbuff[0]
+    register_start_address = m_rxbuff[0];
+
     //Decode received message
     serial_twis_parser_decode_message(m_rxbuff, cnt, is_register_read_request);
 }
@@ -88,6 +98,37 @@ static void serial_twis_write_complete(size_t cnt)
 // Read request, the TWI master (External MCU) has requested data from the TWI slave, load the transmit buffer (that was prepared off of a write request)
 static void serial_twis_read_request(void)
 {
+    switch (register_start_address)
+    {
+        // Correlation record is read TWO bytes at a time.
+        case LL_REGISTER_CORR_DATA:
+            break;
+
+        default:
+        {
+            // copy library register values
+            lidar_lite_get_library_register_cache(library_register_values);
+            start = register_start_address;
+
+            wrap_around = start + WIRE_LIB_BUFFER_SIZE;
+
+            if (wrap_around > MAX_LIBRARY_REG_SIZE - 1)
+            {
+                offset = abs(MAX_LIBRARY_REG_SIZE - wrap_around);
+                // copy first part of buffer
+                memcpy(m_txbuff, &library_register_values[start], MAX_LIBRARY_REG_SIZE - start);
+                // copy the wrap around
+                memcpy(&m_txbuff[WIRE_LIB_BUFFER_SIZE - offset], &library_register_values[0], offset);
+            }
+            else
+            {
+                memcpy(m_txbuff, &library_register_values[start], WIRE_LIB_BUFFER_SIZE);
+            }
+
+            m_txbuff_used = WIRE_LIB_BUFFER_SIZE;
+        }
+        break;
+    }
     (void) nrf_drv_twis_tx_prepare(&m_twis, m_txbuff, m_txbuff_used);
 }
 
@@ -187,7 +228,12 @@ ret_code_t lidar_lite_serial_twis_init(nrf_drv_twis_event_handler_t event_handle
     // create copy of event_handler for restarts.
     m_copy_event_handler = event_handler;
     // store the ANT_ID for later use
-     m_unit_identification.shared.ant_id = LL_ANT_ID;
+    m_unit_identification.shared.ant_id = LL_ANT_ID;
+    // store the ANT_ID in library register cache
+    lidar_lite_set_library_register_value(LL_REGISTER_UNIT_ID_0, m_unit_identification.shared.parts[0]);
+    lidar_lite_set_library_register_value(LL_REGISTER_UNIT_ID_1, m_unit_identification.shared.parts[1]);
+    lidar_lite_set_library_register_value(LL_REGISTER_UNIT_ID_2, m_unit_identification.shared.parts[2]);
+    lidar_lite_set_library_register_value(LL_REGISTER_UNIT_ID_3, m_unit_identification.shared.parts[3]);
 
     // Init TWIS
     do
@@ -265,13 +311,9 @@ ret_code_t serial_twis_check_and_configure_secondary_i2c_address(uint8_t *buffer
     ASSERT(buffer != NULL);
 
     uint8_t i2c_address = (uint8_t)buffer[4];   // store i2c_slave address, location [4]
-    uint32_t ant_id = LL_ANT_ID;
+    uint32_t user_input = serial_twis_id_number_maker(buffer);  // make serial number from buffer
 
-    // extract the four bytes and compare with buffer from I2C interface
-    if ( ((ant_id >> 24) & 0xff) == buffer[3] &&
-         ((ant_id >> 16) & 0xff) == buffer[2] &&
-         ((ant_id >> 8) & 0xff)  == buffer[1] &&
-          (ant_id & 0x000000ff)  == buffer[0] )
+    if (m_unit_identification.shared.ant_id == user_input)
     {
         // the correct ANT_ID was received and matches our UICR register
         // check that the i2c_address is 7bits only
@@ -283,6 +325,7 @@ ret_code_t serial_twis_check_and_configure_secondary_i2c_address(uint8_t *buffer
             {
                 NRF_LOG_ERROR("Secondary slave address could not be written to NVM");
             }
+            lidar_lite_set_library_register_value(LL_REGISTER_I2C_SEC_ADDR, i2c_address);
             // All call are checking NRF_SUCCESS which is equal to FDS_SUCCESS
             return err_code;
         }
@@ -328,6 +371,9 @@ ret_code_t serial_twis_configure_i2c_addresses(uint8_t mode)
     ret_code_t err_code = NRF_SUCCESS;
 
     uint8_t i2c_address, primary, secondary;
+
+    // store I2C mode in library cache
+    lidar_lite_set_library_register_value(LL_REGISTER_I2C_CONFIG, mode);
 
     switch (mode)
     {
@@ -417,9 +463,12 @@ ret_code_t serial_twis_configure_i2c_addresses(uint8_t mode)
 void serial_twis_get_unit_identification(uint8_t *buffer)
 {
     // shared is a union in m_unit_identification
-    // uint32_t ant_id
+    // the LLV4's ANT_ID is stored at power up as a uint32_t
     // uint8_t parts[4]
-    mempcpy(buffer, m_unit_identification.shared.parts, 4);
+    buffer[0] = m_unit_identification.shared.parts[0];
+    buffer[1] = m_unit_identification.shared.parts[1];
+    buffer[2] = m_unit_identification.shared.parts[2];
+    buffer[3] = m_unit_identification.shared.parts[3];
 }
 
 // shutdown I2C interface
@@ -428,4 +477,18 @@ void serial_twis_disable()
     // these function do not return anything
     nrf_drv_twis_disable(&m_twis);
     nrf_drv_twis_uninit(&m_twis);
+}
+
+static uint32_t serial_twis_id_number_maker(uint8_t user_input[])
+{
+    // convert input from first 4 bytes of user_input[]
+    // use the union in ll_unit_id_t to convert 4 bytes to a uint32_t value
+    ll_unit_id_t user_id;
+
+    user_id.shared.parts[0] = user_input[0];
+    user_id.shared.parts[1] = user_input[1];
+    user_id.shared.parts[2] = user_input[2];
+    user_id.shared.parts[3] = user_input[3];
+
+    return user_id.shared.ant_id;
 }

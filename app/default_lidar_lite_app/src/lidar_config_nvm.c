@@ -21,8 +21,10 @@ limitations under the License.
 #include "fds.h"
 #include "lidar_config_nvm.h"
 #include "serial_twis.h"
+#include "serial_twis_parser.h"
 #include "lidar_lite_defines.h"
 #include "ant_message_parser.h"
+#include "lidar_lite_interface.h"
 
 #define NRF_LOG_MODULE_NAME lidar_config_nvm
 #if NRF_LOG_ENABLED && LL_NVM_CONFIG_LOG_ENABLED
@@ -80,6 +82,7 @@ static struct
 } m_delete_all;
 
 static lidar_config_nvm_state_t                 m_lidar_config_nvm_state;
+static lidar_fpga_config_t                      m_temp_lidar_fpga_cfg;
 static ll_nvm_evt_t                             m_nvm_event_type;
 static bool m_slave_address_update_pending      = false;
 static bool m_fds_copy_in_memory                = false;
@@ -295,8 +298,17 @@ static void lidar_config_nvm_evt_handler(void * p_event_data, uint16_t event_siz
                         err_code = fds_record_open(&desc, &config);
                         APP_ERROR_CHECK(err_code);
 
-                        /* Copy the configuration from flash into m_lidar_fpga_cfg. */
-                        memcpy(&m_lidar_fpga_cfg, config.p_data, sizeof(lidar_fpga_config_t));
+                        lidar_fpga_config_t lidar_fpga_config = *(lidar_fpga_config_t *)(config.p_data);
+
+                        /* Check if NVM is enabled. Load the NVM to cache if yes, otherwise use default values*/
+                        if(lidar_fpga_config.enable_nvm_storage == NVM_STORAGE_ENABLED)
+                        {
+                            /* Copy the configuration from flash into m_lidar_fpga_cfg. */
+                            memcpy(&m_lidar_fpga_cfg, config.p_data, sizeof(lidar_fpga_config_t));
+                        }
+
+                        /* Maintain the secondary I2C address regardless NVM being enabled or not */
+                        m_lidar_fpga_cfg.secondary_slave_address = lidar_fpga_config.secondary_slave_address;
 
                         /* Close the record when done reading. */
                         err_code = fds_record_close(&desc);
@@ -557,6 +569,8 @@ uint8_t lidar_nvm_get_power_mode()
     if (m_fds_copy_in_memory == true)
     {
         mode = m_lidar_fpga_cfg.power_mode;
+        // write to register cache
+        lidar_lite_set_library_register_value(LL_POWER_MODE, mode);
     }
     else
     {
@@ -612,6 +626,8 @@ uint8_t lidar_nvm_get_measurement_interval()
     if (m_fds_copy_in_memory == true)
     {
         mode = m_lidar_fpga_cfg.measurement_interval;
+        // write to register cache
+        lidar_lite_set_library_register_value(LL_MEASUREMENT_INTERVAL, mode);
     }
     else
     {
@@ -824,6 +840,8 @@ uint8_t lidar_nvm_get_acquisition_count()
     if (m_fds_copy_in_memory == true)
     {
         level = m_lidar_fpga_cfg.acquisition_count;
+        // write to register cache
+        lidar_lite_set_library_register_value(LL_REGISTER_ACQUISITION_COUNT, level);
     }
     else
     {
@@ -916,6 +934,8 @@ uint8_t lidar_nvm_get_quick_termination_mode()
     if (m_fds_copy_in_memory == true)
     {
         mode = m_lidar_fpga_cfg.quick_termination;
+        // write to register cache
+        lidar_lite_set_library_register_value(LL_QUICK_TERMINATION, mode );
     }
     else
     {
@@ -976,6 +996,8 @@ uint8_t lidar_nvm_get_high_accuracy_count()
     if (m_fds_copy_in_memory == true)
     {
         count = m_lidar_fpga_cfg.high_accuracy_count;
+        // write to register cache
+        lidar_lite_set_library_register_value(LL_HIGH_ACCURACY_MODE, count);
     }
     else
     {
@@ -989,10 +1011,14 @@ bool lidar_nvm_get_access_mode()
 {
     if (m_lidar_fpga_cfg.enable_nvm_storage == NVM_STORAGE_ENABLED)
     {
+        // write to register cache
+        lidar_lite_set_library_register_value(LL_NVM_ACCESS_MODE, NVM_STORAGE_ENABLED);
         return true;
     }
     else
     {
+        // write to register cache
+        lidar_lite_set_library_register_value(LL_NVM_ACCESS_MODE, NVM_STORAGE_DISABLED);
         return false;
     }
 }
@@ -1038,13 +1064,12 @@ ret_code_t lidar_nvm_set_access_mode(uint8_t mode)
             {
                 // create a copy of the existing configuration in RAM
                 // write this to the NVM
-                lidar_fpga_config_t temp_lidar_fpga_cfg;
                 // disable the access
                 m_lidar_fpga_cfg.enable_nvm_storage = DEFAULT_DISABLE_NVM_STORAGE;
-                memcpy(&temp_lidar_fpga_cfg, &m_lidar_fpga_cfg, sizeof(m_lidar_fpga_cfg));
+                memcpy(&m_temp_lidar_fpga_cfg, &m_lidar_fpga_cfg, sizeof(m_lidar_fpga_cfg));
 
                 m_nvm_busy = true;
-                err_code = lidar_config_nvm_update(&temp_lidar_fpga_cfg);
+                err_code = lidar_config_nvm_update(&m_temp_lidar_fpga_cfg);
                 if (err_code != FDS_SUCCESS)
                 {
                     NRF_LOG_ERROR("<%d> Error: lidar_config_nvm_udpate() returned %s.\r\n", __LINE__, fds_err_str[err_code]);

@@ -312,6 +312,17 @@ static void configure_secondary_i2c_address()
             if (err_code == NRF_SUCCESS)
             {
                 NRF_LOG_INFO("Secondary I2C address configured: 0x%02X", slave_address);
+
+                // If secondary I2C address is configured and the address is valid, set the I2C_CONFIG
+                // register to LL_BOTH_ADDRESSES
+                if( slave_address != LL_I2C_DEACTIVATED )
+                {
+                    err_code = serial_twis_configure_i2c_addresses(LL_BOTH_ADDRESSES);
+                    if(err_code != NRF_SUCCESS)
+                    {
+                        NRF_LOG_DEBUG("Configure I2C_CONFIG to LL_BOTH_ADDRESSES FAILED");
+                    }
+                }
             }
             else
             {
